@@ -21,6 +21,8 @@ import xml.etree.ElementTree as ElementTree
 
 import requests
 
+import pyperclip
+
 logger = logging.getLogger(__name__)
 
 
@@ -833,6 +835,7 @@ def get_ytplayer_config(html: str, age_restricted: bool = False) -> Any:
     else:
         pattern = r";ytplayer\.config\s*=\s*({.*?});"
     yt_player_config = regex_search(pattern, html, group=1)
+
     return json.loads(yt_player_config)
 
 def regex_search(pattern: str, string: str, group: int) -> str:
@@ -967,6 +970,7 @@ def video_info_url(
                 ("hl", "en_US"),
             ]
         )
+
     return "https://youtube.com/get_video_info?" + urlencode(params)
 
 
@@ -1375,11 +1379,7 @@ def apply_descrambler(stream_data: Dict, key: str) -> None:
         "url_encoded_fmt_stream_map"
     ):
         formats = json.loads(stream_data["player_response"])["streamingData"]["formats"]
-        formats.extend(
-            json.loads(stream_data["player_response"])["streamingData"][
-                "adaptiveFormats"
-            ]
-        )
+        formats.extend(json.loads(stream_data["player_response"])["streamingData"]["adaptiveFormats"])
         try:
             stream_data[key] = [
                 {
@@ -1449,8 +1449,8 @@ class YouTube:
 
         self.watch_html: Optional[str] = None  # the html of /watch?v=<video_id>
         self.embed_html: Optional[str] = None
-        self.player_config_args: Dict = {}  # inline js in the html containing
-        # streams
+        self.player_config_args: Dict = {}  # inline js in the html containing streams
+
         self.age_restricted: Optional[bool] = None
         self.vid_descr: Optional[str] = None
 
@@ -1467,9 +1467,6 @@ class YouTube:
         # A dictionary shared between all instances of :class:`Stream <Stream>`
         # (Borg pattern). Boooooo.
         self.stream_monostate = Monostate()
-
-        # if proxies:
-        #     install_proxy(proxies)
 
         if not defer_prefetch_init:
             self.prefetch()
@@ -1489,6 +1486,11 @@ class YouTube:
         logger.info("init started")
 
         self.vid_info = dict(parse_qsl(self.vid_info_raw))
+
+        pyperclip.copy(json.dumps(self.vid_info))
+        print("NICE")
+
+        # Check to see if you need to make this distinction
         if self.age_restricted:
             self.player_config_args = self.vid_info
         else:
@@ -1516,7 +1518,9 @@ class YouTube:
         # unscramble the progressive and adaptive stream manifests.
         for fmt in stream_maps:
             if not self.age_restricted and fmt in self.vid_info:
+                print("YES")
                 apply_descrambler(self.vid_info, fmt)
+
             apply_descrambler(self.player_config_args, fmt)
 
             try:
@@ -1524,6 +1528,7 @@ class YouTube:
                     self.player_config_args, fmt, self.js  # type: ignore
                 )
             except TypeError:
+                print(fmt)
                 assert self.embed_html is not None
                 self.js_url = js_url(self.embed_html, self.age_restricted)
                 self.js = get(self.js_url)
@@ -1568,6 +1573,7 @@ class YouTube:
             age_restricted=self.age_restricted,
         )
         self.vid_info_raw = get(self.vid_info_url)
+
         if not self.age_restricted:
             self.js_url = js_url(self.watch_html, self.age_restricted)
             self.js = get(self.js_url)
@@ -2068,11 +2074,11 @@ def get_format_profile(itag: int) -> Dict:
 
 
 def main():
-    vod = YouTube("https://www.youtube.com/watch?v=RSX2o7EhtcE")
+    vod = YouTube("https://www.youtube.com/watch?v=DBzuYNK95sM")
 
     myVideoStreams = vod.streams
 
-    audioStream = myVideoStreams.filter(type = "audio")
+    audioStream = myVideoStreams.filter(type = "audio", audio_codec="mp4a.40.2")
 
     best_stream = None
     hq = 0
@@ -2084,7 +2090,7 @@ def main():
             hq = stream.filesize
             best_stream = stream
 
-    best_stream.download(output_path="./", filename="test1")
+    best_stream.download(output_path="./", filename="ratmtest")
 
 if __name__ == "__main__":
     main()
