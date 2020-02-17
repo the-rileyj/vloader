@@ -1151,6 +1151,7 @@ def get_transform_map(js: str, var: str) -> Dict:
 
     """
     transform_object = get_transform_object(js, var)
+
     mapper = {}
     for obj in transform_object:
         # AJ:function(a){a.reverse()} => AJ, function(a){a.reverse()}
@@ -1280,7 +1281,6 @@ def get_signature(js: str, ciphered_signature: str) -> str:
     :rtype: str
     :returns:
        Decrypted signature required to download the media content.
-
     """
     transform_plan = get_transform_plan(js)
     var, _ = transform_plan[0].split(".")
@@ -1323,6 +1323,9 @@ def apply_signature(config_args: Dict, fmt: str, js: str) -> None:
         .get("playabilityStatus", {},)
         .get("liveStreamability")
     )
+
+    sigs = []
+
     for i, stream in enumerate(stream_manifest):
         try:
             url: str = stream["url"]
@@ -1353,6 +1356,10 @@ def apply_signature(config_args: Dict, fmt: str, js: str) -> None:
         )
         # 403 forbidden fix
         stream_manifest[i]["url"] = url + "&sig=" + signature
+
+        sigs.append(stream_manifest[i]["url"])
+
+    pyperclip.copy("\n".join(sigs))
 
 
 def apply_descrambler(stream_data: Dict, key: str) -> None:
@@ -2074,6 +2081,7 @@ def get_format_profile(itag: int) -> Dict:
 
 
 def main():
+    # vod = YouTube("https://www.youtube.com/watch?v=DBzuYNK95sM")
     vod = YouTube("https://www.youtube.com/watch?v=DBzuYNK95sM")
 
     myVideoStreams = vod.streams
@@ -2090,7 +2098,7 @@ def main():
             hq = stream.filesize
             best_stream = stream
 
-    best_stream.download(output_path="./", filename="ratmtest")
+    best_stream.download(output_path="./", filename="trial_1_-_best_mach_v2_")
 
 if __name__ == "__main__":
     main()

@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -174,6 +177,8 @@ type YouTubeVideoInfoArgs struct {
 }
 
 type YouTube struct {
+	URL     string
+	Streams []YouTubeStreamInfo
 }
 
 func youtubeGetRequest(URL string) (*http.Request, error) {
@@ -189,6 +194,8 @@ func youtubeGetRequest(URL string) (*http.Request, error) {
 }
 
 func newYouTube(URL string) (*YouTube, error) {
+	var youtube YouTube
+
 	videoIDMatch := VideoIDRegex.FindStringSubmatch(URL)
 
 	if len(videoIDMatch) != 2 {
@@ -359,6 +366,9 @@ func newYouTube(URL string) (*YouTube, error) {
 	fmt.Println(isAgeRestricted, youtubePlayerConfig.VideoDetails.Author)
 
 	jsURL := fmt.Sprintf("https://youtube.com%s", youtubeVideoInfo.Assets.JS)
+	var rawJS []byte
+
+	youtube.Streams = make([]YouTubeStreamInfo, 0)
 
 	for _, stream := range youtubePlayerConfig.StreamingData.AdaptiveFormats {
 		streamValues, err := url.ParseQuery(stream.Cipher)
@@ -376,27 +386,216 @@ func newYouTube(URL string) (*YouTube, error) {
 		}
 
 		if !(strings.Contains(streamInfo.URL, "signature") || (!strings.Contains(streamInfo.URL, "s") && (strings.Contains(streamInfo.URL, "sig=") || strings.Contains(streamInfo.URL, "lsig=")))) {
+			if len(rawJS) == 0 {
+				getJSRequest, err := youtubeGetRequest(jsURL)
+
+				if err != nil {
+					return nil, err
+				}
+
+				getJSResponse, err := http.DefaultClient.Do(getJSRequest)
+
+				if err != nil {
+					return nil, err
+				}
+
+				rawJS, err = ioutil.ReadAll(getJSResponse.Body)
+
+				getJSResponse.Body.Close()
+
+				if err != nil {
+					return nil, err
+				}
+			}
 			// Decipher here
+
+			// Transform Plan Func
+
+			transformFunctionRegexStrings := []string{
+				`\b[cs]\s*&&\s*[adf]\.set\([^,]+\s*,\s*encodeURIComponent\s*\(\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\b[a-zA-Z0-9]+\s*&&\s*[a-zA-Z0-9]+\.set\([^,]+\s*,\s*encodeURIComponent\s*\(\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\b(?P<sig>[a-zA-Z0-9$]{2})\s*=\s*function\(\s*a\s*\)\s*{\s*a\s*=\s*a\.split\(\s*""\s*\)`,
+				`(?P<sig>[a-zA-Z0-9$]+)\s*=\s*function\(\s*a\s*\)\s*{\s*a\s*=\s*a\.split\(\s*""\s*\)`,
+				`(["\'])signature\1\s*,\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\.sig\|\|(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`yt\.akamaized\.net/\)\s*\|\|\s*.*?\s*[cs]\s*&&\s*[adf]\.set\([^,]+\s*,\s*(?:encodeURIComponent\s*\()?\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\b[cs]\s*&&\s*[adf]\.set\([^,]+\s*,\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\b[a-zA-Z0-9]+\s*&&\s*[a-zA-Z0-9]+\.set\([^,]+\s*,\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\bc\s*&&\s*a\.set\([^,]+\s*,\s*\([^)]*\)\s*\(\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\bc\s*&&\s*[a-zA-Z0-9]+\.set\([^,]+\s*,\s*\([^)]*\)\s*\(\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+				`\bc\s*&&\s*[a-zA-Z0-9]+\.set\([^,]+\s*,\s*\([^)]*\)\s*\(\s*(?P<sig>[a-zA-Z0-9$]+)\(`,
+			}
+
+			initialFunctionName := ""
+
+			for _, transformFunctionRegexString := range transformFunctionRegexStrings {
+				transformFunctionRegex := regexp.MustCompile(transformFunctionRegexString)
+
+				transformFuncMatch := transformFunctionRegex.FindSubmatch(rawJS)
+
+				if len(transformFuncMatch) == 2 {
+					initialFunctionName = string(transformFuncMatch[1])
+
+					break
+				}
+			}
+
+			if initialFunctionName == "" {
+				return nil, errors.New("could not find transform initial function name")
+			}
+
+			transformPlanRegex := regexp.MustCompile(fmt.Sprintf(`%s=function\(\w\){[a-z=\.\(\"\)]*;(.*);(?:.+)}`, regexp.QuoteMeta(initialFunctionName)))
+
+			transformPlanMatch := transformPlanRegex.FindSubmatch(rawJS)
+
+			if len(transformPlanMatch) != 2 {
+				return nil, errors.New("could not find transform plan function name")
+			}
+
+			transformPlan := strings.Split(string(transformPlanMatch[1]), ";")
+
+			// Get Transform Map Func
+
+			initialVariable := strings.Split(transformPlan[0], ".")[0]
+
+			// Check here if trouble, otherwise do length check so no panic
+			transformObjectRegex := regexp.MustCompile(fmt.Sprintf(`(?s)var %s={(.*?)};`, regexp.QuoteMeta(initialVariable)))
+
+			transformObjectRegexResults := transformObjectRegex.FindSubmatch(rawJS)
+
+			if len(transformObjectRegexResults) != 2 {
+				return nil, errors.New("could not find transform object")
+			}
+
+			transformObjects := strings.Split(strings.Replace(string(transformObjectRegexResults[1]), "\n", " ", -1), ", ")
+
+			functionsMap := make(map[string]func(string, int) string)
+
+			functionRegexStringsMap := map[string]func(string, int) string{
+				// function(a){a.reverse()}
+				`{\w\.reverse\(\)}`: reverse, // Reverse
+				// function(a,b){a.splice(0,b)}
+				`{\w\.splice\(0,\w\)}`: splice, // Splice
+				// function(a,b){var c=a[0];a[0]=a[b%a.length];a[b]=c}
+				`{var\s\w=\w\[0\];\w\[0\]=\w\[\w\%\w.length\];\w\[\w\]=\w}`: swap, // Swap
+				// function(a,b){var c=a[0];a[0]=a[b%a.length];a[b%a.length]=c}
+				`{var\s\w=\w\[0\];\w\[0\]=\w\[\w\%\w.length\];\w\[\w\%\w.length\]=\w}`: swap, // Swap
+			}
+
+			for _, tranformsObject := range transformObjects {
+				name, function := strings.Split(tranformsObject, ":")[0], strings.Split(tranformsObject, ":")[1]
+
+				for functionRegexString, equivalentFunction := range functionRegexStringsMap {
+					if regexp.MustCompile(functionRegexString).MatchString(function) {
+						functionsMap[name] = equivalentFunction
+
+						break
+					}
+				}
+			}
+
+			signature := streamInfo.S
+
+			for _, jsFunction := range transformPlan {
+				// Parse func
+				jsFunctionMatch := regexp.MustCompile(`\w+\.(\w+)\(\w,(\d+)\)`).FindStringSubmatch(jsFunction)
+
+				if len(jsFunctionMatch) != 3 {
+					return nil, errors.New("could not parse JS function in transform plan")
+				}
+
+				functionName, functionArgString := jsFunctionMatch[1], jsFunctionMatch[2]
+
+				functionArg, err := strconv.Atoi(functionArgString)
+
+				if err != nil {
+					return nil, err
+				}
+
+				signature = functionsMap[functionName](signature, functionArg)
+			}
+
+			if streamInfo.URL[len(streamInfo.URL)-1] == '&' {
+				streamInfo.URL = streamInfo.URL[:len(streamInfo.URL)-2]
+			}
+
+			streamInfo.URL = fmt.Sprintf("%s&sig=%s", streamInfo.URL, signature)
 		}
 
-		fmt.Println(streamInfo.Type, streamInfo.S)
+		youtube.Streams = append(youtube.Streams, streamInfo)
 	}
 
-	fmt.Println(jsURL)
+	return &youtube, nil
+}
 
-	return &YouTube{}, nil
+func reverse(signature string, _ int) string {
+	n := 0
+	rune := make([]rune, len(signature))
+
+	for _, r := range signature {
+		rune[n] = r
+		n++
+	}
+
+	rune = rune[0:n]
+
+	// Reverse
+	for i := 0; i < n/2; i++ {
+		rune[i], rune[n-1-i] = rune[n-1-i], rune[i]
+	}
+
+	// Convert back to UTF-8.
+	return string(rune)
+}
+
+func splice(signature string, index int) string {
+	return signature[:index] + signature[index*2:]
+}
+
+func swap(signature string, index int) string {
+	r := index % len(signature)
+
+	return string(signature[r]) + signature[1:r] + string(signature[0]) + signature[r+1:]
+}
+
+var audioExtensionMap = map[string]string{
+	"mp4": "m4a",
 }
 
 func main() {
-	_, err := newYouTube("https://www.youtube.com/watch?v=DBzuYNK95sM")
+	youtube, err := newYouTube("https://www.youtube.com/watch?v=DBzuYNK95sM")
 
 	if err != nil {
 		panic(err)
 	}
 
-	_, err = newYouTube("https://www.youtube.com/watch?v=Fl-e2PM1ITM&bpctr=1581197742")
+	for _, stream := range youtube.Streams {
+		if strings.HasPrefix(stream.Type, "audio/mp4") {
+			videoDownloadRequest, err := youtubeGetRequest(stream.URL)
 
-	if err != nil {
-		panic(err)
+			if err != nil {
+				panic(err)
+			}
+
+			videoDownloadResponse, err := http.DefaultClient.Do(videoDownloadRequest)
+
+			if err != nil {
+				panic(err)
+			}
+
+			downloadFile, err := os.Create("nice.mp4")
+
+			io.Copy(downloadFile, videoDownloadResponse.Body)
+
+			videoDownloadResponse.Body.Close()
+
+			downloadFile.Close()
+		}
 	}
+
+	// _, err = newYouTube("https://www.youtube.com/watch?v=Fl-e2PM1ITM&bpctr=1581197742")
+
+	// if err != nil {
+	// 	panic(err)
+	// }
 }
